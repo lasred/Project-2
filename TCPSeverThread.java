@@ -2,32 +2,25 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
-import java.net.InetAddress;
 import java.util.*;
+import java.net.InetAddress;
+
 public class TCPSeverThread implements Runnable{
-   private static Map<String, Connection> ipAddressToConnection;   
-   private static final String[] ipAddressesOfAllMachines = 
+
+    private static final String ACKNOWLEDGE_UPDATE = "Acknowledge Update: ";
+    private static final String UPDATE_ACKNOWLEDGED = "Update Acknowledged!";
+    private static final String GO_MESSAGE = "GO";
+    private static final String[] ipAddressesOfAllMachines = 
              {"172.22.71.28","172.22.71.29", "172.22.71.30",
              "172.22.71.31", "172.22.71.32"}; 
     private static final int portOfOtherMachine = 7000;
-    private static final String ACKNOWLEDGE_THIS = "Acknowledge"; 
-    private Socket socket = null;
+    private static final int GET_OPERATION = 1;
+    private static final int PUT_OPERATION = 2;
+    private static final int DELETE_OPERATION = 3;
+
+    private Socket socket;
 	
     public TCPSeverThread(Socket socket) {
-        //only initialize these connections once
-        ipAddressToConnection = new HashMap<String, Connection>();
-        try {
-            final String localIpAddress = InetAddress.getLocalHost().getHostAddress();
-            for(String ipAddressOfMachine: ipAddressesOfAllMachines) {
-                if(!localIpAddress.equals(ipAddressOfMachine)) {
-                  Connection connection = new TCPConnection(ipAddressOfMachine, portOfOtherMachine);
-                  connection.createConnection();
-                  ipAddressToConnection.put(ipAddressOfMachine, connection);
-                }
-             }
-        } catch(Exception e) {
-
-        }
         this.socket =  socket;
     }
 
@@ -38,47 +31,84 @@ public class TCPSeverThread implements Runnable{
 			PrintWriter output = new PrintWriter(socket.getOutputStream(), true);
 	        BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
 	        String inputLine;
+            Map<String, Connection> ipAddressToConnection = null;
+            Packet buffer = null;
+            final String localIpAddress = InetAddress.getLocalHost().getHostAddress();
+            final List<String> acknowledgers = new ArrayList<String>();
 	        while((inputLine = input.readLine()) != null){
-                    //so you dont keep passing dat aback and forth 
-                   if(!inputLine.contains(ACKNOWLEDGE_THIS)) {
-                     for(final String ipAddress: ipAddressToConnection.keySet()) {
-                        ipAddressToConnection.get(ipAddress).send((inputLine+ACKNOWLEDGE_THIS).getBytes());                      
-                      }
-                   }
-                   
+                 if(ipAddressToConnection == null) {
+                     ipAddressToConnection = new HashMap<String, Connection>();
+                     for(String ipAddressOfMachine: ipAddressesOfAllMachines) {
+                        if(!localIpAddress.equals(ipAddressOfMachine)) {
+                           Connection connection = new TCPConnection(ipAddressOfMachine, portOfOtherMachine);
+                           connection.createConnection();
+                           ipAddressToConnection.put(ipAddressOfMachine, connection);
+                       }
+                     }
+                 }
                 Packet pac = encodeco.decodeData(inputLine.getBytes());
-                Packet response = new Packet();
-                if(pac.getOperation() == 1){
-                	String key = pac.getKey();
-                	if(Server.keyValueMap.get(key) != null){
-                		response.setOperation((short) 5);
-                		response.setValue(Server.keyValueMap.get(key));
-                	}else{
-                		response.setOperation((short) 6);
-                	}
-                }else if(pac.getOperation() == 2){
-                	synchronized(Server.keyValueMap){
-                		Server.keyValueMap.put(pac.getKey(), pac.getvalue());
-                	}
-                	response.setOperation((short) 4);
-                }else if(pac.getOperation() == 3){
-                	synchronized (Server.keyValueMap) {
-                		Server.keyValueMap.remove(pac.getKey());
-					}
-                	response.setOperation((short) 7);
-                }else{
-                	System.out.println("Unknown operation requested");
-                	response.setOperation((short) -1);
+                 //only forward non acknowledgements, only need to do this for PUT or
+                //DELETE operations
+                if(!inputLine.contains(ACKNOWLEDGE_UPDATE) && pac.getOperation() != GET_OPERATION) {
+                  for(final String ipAddress: ipAddressToConnection.keySet()) {
+                     //first part of two phase commit 
+                    ipAddressToConnection.get(ipAddress).send((ACKNOWLEDGE_UPDATE+inputLine).getBytes());                      
+                  }
+                  //once you get all of them back, then GO MESSAGE
                 }
-                
-                byte[] responseByte = encodeco.encodeData(response);
-                output.println(new String(responseByte) + this.socket.getInetAddress().toString());
-	        }
-		}catch(Exception e){
+                else if(inputLine.contains(ACKNOWLEDGE_UPDATE)) {
+                    buffer = pac;
+                    output.println(inputLine + UPDATE_ACKNOWLEDGED);
+                } else if(inputLine.contains(UPDATE_ACKNOWLEDGED)) {
+                    //once you get all of them back, then GO MESSAGE
+                    String acknowledgerIpAddress = this.socket.getRemoteSocketAddress().toString();
+                    acknowledgers.add(acknowledgerIpAddress);
+                    List<String> allMachines = Arrays.asList(ipAddressesOfAllMachines);
+                    allMachines.remove(localIpAddress);
+                    if(acknowledgers.equals(allMachines)) {
+                        //once you get all of them back, then GO MESSAGE
+                        for(final String ipAddress: ipAddressToConnection.keySet()) {
+                           ipAddressToConnection.get(ipAddress).send((GO_MESSAGE+inputLine).getBytes());                      
+                        }
+                        //execute the transaction as well
+                        executeTransaction(pac, output, encodeco);
+                    }
+                }  else if(inputLine.contains(GO_MESSAGE)) {
+                    executeTransaction(buffer, output, encodeco);
+                }
+          }
+        }catch(Exception e){
 			
 		}
-		
-		
 	}
+
+
+    private static void executeTransaction(Packet pac, PrintWriter output, ServerEncoderDecoder encodeco) {
+        Packet response = new Packet();
+        if(pac.getOperation() == GET_OPERATION){
+            String key = pac.getKey();
+            if(Server.keyValueMap.get(key) != null){
+                response.setOperation((short) 5);
+                response.setValue(Server.keyValueMap.get(key));
+            }else{
+                response.setOperation((short) 6);
+            }
+        }else if(pac.getOperation() == PUT_OPERATION){
+            synchronized(Server.keyValueMap){
+                Server.keyValueMap.put(pac.getKey(), pac.getvalue());
+            }
+            response.setOperation((short) 4);
+        }else if(pac.getOperation() == DELETE_OPERATION){
+            synchronized (Server.keyValueMap) {
+                Server.keyValueMap.remove(pac.getKey());
+            }
+            response.setOperation((short) 7);
+        }else{
+            System.out.println("Unknown operation requested");
+            response.setOperation((short) -1);
+        }
+        byte[] responseByte = encodeco.encodeData(response);
+        output.println(new String(responseByte));     
+    }
 
 }

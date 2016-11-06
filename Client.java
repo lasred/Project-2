@@ -27,7 +27,7 @@ public class Client {
 			connection = new TCPConnection(hostName, portNo);
 			boolean status = connection.createConnection();
 			if(!status){
-				System.out.println("Error while creating UDP connection");
+				System.out.println("Error while creating TCP connection");
 				System.exit(1);
 			}
 			
