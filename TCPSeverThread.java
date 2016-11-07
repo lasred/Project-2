@@ -7,12 +7,11 @@ import java.net.InetAddress;
 
 public class TCPSeverThread implements Runnable{
 
-    private static final String ACKNOWLEDGE_UPDATE = "Acknowledge Update: ";
+    private static final String ACKNOWLEDGE_UPDATE = " Is update that needs to be acknowledged";
     private static final String UPDATE_ACKNOWLEDGED = "Update Acknowledged!";
     private static final String GO_MESSAGE = "GO";
     private static final String[] ipAddressesOfAllMachines = 
-             {"172.22.71.28","172.22.71.29", "172.22.71.30",
-             "172.22.71.31", "172.22.71.32"}; 
+             {"172.22.71.28","172.22.71.29"}; 
     private static final int portOfOtherMachine = 7000;
     private static final int GET_OPERATION = 1;
     private static final int PUT_OPERATION = 2;
@@ -34,38 +33,47 @@ public class TCPSeverThread implements Runnable{
             Map<String, Connection> ipAddressToConnection = null;
             Packet buffer = null;
             final String localIpAddress = InetAddress.getLocalHost().getHostAddress();
-            final List<String> acknowledgers = new ArrayList<String>();
+            final Set<String> acknowledgers = new HashSet<String>();
 	        while((inputLine = input.readLine()) != null){
                  if(ipAddressToConnection == null) {
                      ipAddressToConnection = new HashMap<String, Connection>();
                      for(String ipAddressOfMachine: ipAddressesOfAllMachines) {
                         if(!localIpAddress.equals(ipAddressOfMachine)) {
-                           Connection connection = new TCPConnection(ipAddressOfMachine, portOfOtherMachine);
-                           connection.createConnection();
-                           ipAddressToConnection.put(ipAddressOfMachine, connection);
+                           try{
+                              Connection connection = new TCPConnection(ipAddressOfMachine, portOfOtherMachine); 
+                              connection.createConnection();
+                              ipAddressToConnection.put(ipAddressOfMachine, connection);
+                           }catch(Exception e){
+                        
+                           }
                        }
                      }
                  }
+                System.out.println(inputLine);
                 Packet pac = encodeco.decodeData(inputLine.getBytes());
                  //only forward non acknowledgements, only need to do this for PUT or
-                //DELETE operations
+                //
+                 //DELETE operations
                 if(!inputLine.contains(ACKNOWLEDGE_UPDATE) && pac.getOperation() != GET_OPERATION) {
+                  System.out.println("Forwarded Correctly");
                   for(final String ipAddress: ipAddressToConnection.keySet()) {
                      //first part of two phase commit 
-                    ipAddressToConnection.get(ipAddress).send((ACKNOWLEDGE_UPDATE+inputLine).getBytes());                      
+                    ipAddressToConnection.get(ipAddress).send((inputLine+ACKNOWLEDGE_UPDATE).getBytes());                      
                   }
-                  //once you get all of them back, then GO MESSAGE
+                  //everything is good till here
                 }
                 else if(inputLine.contains(ACKNOWLEDGE_UPDATE)) {
                     buffer = pac;
+                    System.out.println("acknowledge update, hit coorindator back");
                     output.println(inputLine + UPDATE_ACKNOWLEDGED);
                 } else if(inputLine.contains(UPDATE_ACKNOWLEDGED)) {
                     //once you get all of them back, then GO MESSAGE
                     String acknowledgerIpAddress = this.socket.getRemoteSocketAddress().toString();
+                    System.out.println("acknowledged ip address " + acknowledgerIpAddress);
                     acknowledgers.add(acknowledgerIpAddress);
-                    List<String> allMachines = Arrays.asList(ipAddressesOfAllMachines);
-                    allMachines.remove(localIpAddress);
-                    if(acknowledgers.equals(allMachines)) {
+                    Set<String> allMachinesThatNeedToSendAcknowledgement = ipAddressToConnection.keySet();
+                    if(acknowledgers.equals(allMachinesThatNeedToSendAcknowledgement)) {
+                        acknowledgers.clear();
                         //once you get all of them back, then GO MESSAGE
                         for(final String ipAddress: ipAddressToConnection.keySet()) {
                            ipAddressToConnection.get(ipAddress).send((GO_MESSAGE+inputLine).getBytes());                      
@@ -75,6 +83,8 @@ public class TCPSeverThread implements Runnable{
                     }
                 }  else if(inputLine.contains(GO_MESSAGE)) {
                     executeTransaction(buffer, output, encodeco);
+                } else if(pac.getOperation() == GET_OPERATION) {
+                    executeTransaction(pac, output, encodeco);
                 }
           }
         }catch(Exception e){
